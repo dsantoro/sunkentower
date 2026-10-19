@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { CalendarDays, Check, Clock3, LogOut, Moon, Pencil, Plus, Sun, Trash2, X } from 'lucide-react'
+import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { CalendarDays, Check, Clock3, LogIn, LogOut, Moon, Pencil, Plus, Sun, Trash2, X } from 'lucide-react'
 import { getGameDate, getNextAvailableAt, formatCountdown, formatShortDate, toDateInputValue } from './tower.js'
 import { isSupabaseConfigured, supabase } from './supabase.js'
 import './App.css'
@@ -81,8 +82,7 @@ function mapDatabaseCharacter(row) {
   }
 }
 
-function AuthScreen({ theme, onToggleTheme, onAuthenticate }) {
-  const [mode, setMode] = useState('login')
+function AuthScreen({ mode, theme, onToggleTheme, onAuthenticate, onNavigate }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [passwordConfirmation, setPasswordConfirmation] = useState('')
@@ -101,14 +101,17 @@ function AuthScreen({ theme, onToggleTheme, onAuthenticate }) {
       const result = await onAuthenticate({ mode, email: email.trim(), password })
       setMessage({ type: 'success', text: result })
     } catch (error) {
-      setMessage({ type: 'error', text: error.message || 'Não foi possível autenticar. Tente novamente.' })
+      const text = error.message === 'Email not confirmed'
+        ? 'Confirme seu e-mail pelo link enviado antes de entrar.'
+        : error.message || 'Não foi possível autenticar. Tente novamente.'
+      setMessage({ type: 'error', text })
     } finally {
       setBusy(false)
     }
   }
 
   function changeMode(nextMode) {
-    setMode(nextMode)
+    onNavigate(nextMode === 'signup' ? '/cadastro' : '/login')
     setMessage(null)
   }
 
@@ -250,8 +253,10 @@ function CharacterRow({ character, now, onRecord, onEdit, onDelete }) {
   )
 }
 
-function App() {
-  const [characters, setCharacters] = useState([])
+function AppContent() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const [characters, setCharacters] = useState(readCharacters)
   const [dialogCharacter, setDialogCharacter] = useState(undefined)
   const [now, setNow] = useState(Date.now)
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'light')
@@ -262,6 +267,9 @@ function App() {
   const [localImportAvailable, setLocalImportAvailable] = useState(false)
 
   useEffect(() => { localStorage.setItem(THEME_KEY, theme) }, [theme])
+  useEffect(() => {
+    if (!session) localStorage.setItem(STORAGE_KEY, JSON.stringify(characters))
+  }, [characters, session])
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
@@ -280,7 +288,7 @@ function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession)
       if (!nextSession) {
-        setCharacters([])
+        setCharacters(readCharacters())
         setLocalImportAvailable(false)
         setCharactersLoadedFor(null)
       }
@@ -342,6 +350,16 @@ function App() {
 
   async function saveCharacter(updatedCharacter) {
     setAppError('')
+    if (!session) {
+      setCharacters((current) => {
+        const exists = current.some((character) => character.id === updatedCharacter.id)
+        return exists
+          ? current.map((character) => character.id === updatedCharacter.id ? updatedCharacter : character)
+          : [...current, updatedCharacter]
+      })
+      setDialogCharacter(undefined)
+      return
+    }
     const { data, error } = await supabase
       .from('tower_characters')
       .upsert({
@@ -368,6 +386,10 @@ function App() {
   }
 
   async function deleteCharacter(id) {
+    if (!session) {
+      setCharacters((current) => current.filter((character) => character.id !== id))
+      return
+    }
     const { error } = await supabase.from('tower_characters').delete().eq('id', id).eq('user_id', session.user.id)
     if (error) {
       setAppError(error.message)
@@ -378,6 +400,10 @@ function App() {
 
   async function recordTower(id) {
     const gameDate = getGameDate(new Date())
+    if (!session) {
+      setCharacters((current) => current.map((character) => character.id === id ? { ...character, lastDoneDate: gameDate } : character))
+      return
+    }
     const { data, error } = await supabase
       .from('tower_characters')
       .update({ last_done_date: gameDate })
@@ -426,13 +452,12 @@ function App() {
     return <main className="app-shell auth-shell" data-theme={theme}><div className="auth-loading">Conectando à sua conta...</div></main>
   }
 
-  if (!isSupabaseConfigured) {
-    return <main className="app-shell auth-shell" data-theme={theme}><section className="auth-config-error"><h1>Supabase não configurado</h1><p>Configure SUPABASE_URL e SUPABASE_PUBLISHABLE_KEY no arquivo .env e reinicie o Vite.</p></section></main>
+  const isAuthRoute = location.pathname === '/login' || location.pathname === '/cadastro'
+  if (!session && isAuthRoute) {
+    return <AuthScreen mode={location.pathname === '/cadastro' ? 'signup' : 'login'} theme={theme} onToggleTheme={() => setTheme((current) => current === 'light' ? 'dark' : 'light')} onAuthenticate={authenticate} onNavigate={navigate} />
   }
 
-  if (!session) {
-    return <AuthScreen theme={theme} onToggleTheme={() => setTheme((current) => current === 'light' ? 'dark' : 'light')} onAuthenticate={authenticate} />
-  }
+  if (location.pathname === '/login' || location.pathname === '/cadastro') return <Navigate to="/" replace />
 
   return (
     <main className="app-shell" data-theme={theme}>
@@ -443,8 +468,10 @@ function App() {
         </a>
         <div className="topbar-right">
           <span className="reset-note"><Clock3 size={14} /> Reset diário <b>04:00</b></span>
-          <span className="account-email">{session.user.email}</span>
-          <button className="icon-button signout-button" type="button" aria-label="Sair da conta" title="Sair" onClick={signOut}><LogOut size={16} /></button>
+          {session ? <>
+            <span className="account-email">{session.user.email}</span>
+            <button className="icon-button signout-button" type="button" aria-label="Sair da conta" title="Sair" onClick={signOut}><LogOut size={16} /></button>
+          </> : <Link className="button button-quiet login-link" to="/login"><LogIn size={15} /> Entrar</Link>}
           <button className="theme-toggle" type="button" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label={theme === 'light' ? 'Ativar modo escuro' : 'Ativar modo claro'} title={theme === 'light' ? 'Modo escuro' : 'Modo claro'}>
             {theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}
           </button>
@@ -504,10 +531,20 @@ function App() {
             </div>
           )}
         </section>
-        <footer className="page-footer"><span>TORRE DE PRONTERA</span><span>Personagens sincronizados com sua conta.</span></footer>
+        <footer className="page-footer"><span>TORRE DE PRONTERA</span><span>{session ? 'Personagens sincronizados com sua conta.' : 'Personagens salvos neste dispositivo.'}</span></footer>
       </div>
       {dialogCharacter !== undefined && <CharacterDialog character={dialogCharacter} today={toDateInputValue(new Date(now))} onClose={() => setDialogCharacter(undefined)} onSave={saveCharacter} />}
     </main>
+  )
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="*" element={<AppContent />} />
+      </Routes>
+    </BrowserRouter>
   )
 }
 
